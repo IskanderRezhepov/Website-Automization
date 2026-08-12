@@ -1,0 +1,2 @@
+# Put one 12-digit BIN per line. Replace these examples before use.
+123456789012
