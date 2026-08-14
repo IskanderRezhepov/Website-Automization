@@ -1,0 +1,243 @@
+
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Электронное кредитное досье</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="container">
+    <div class="toolbar"><a class="button secondary" href="{{ url_for('main.history') }}">История и клиенты</a></div>
+    <section class="card hero">
+        <h1>Анализатор электронного кредитного досье</h1>
+        <p>
+            Поддерживает цифровые PDF, сканированные PDF и фотографии документов.
+            Для сканов и фото автоматически используется OCR.
+        </p>
+
+        {% if error %}
+            <div class="alert error">{{ error }}</div>
+        {% endif %}
+
+        <form id="analysis-form" method="post" action="{{ url_for('main.analyze') }}" enctype="multipart/form-data">
+            <label class="upload">
+                <span>Документы — можно выбрать несколько файлов одновременно</span>
+                <input
+                    id="documents-input"
+                    type="file"
+                    name="documents"
+                    multiple
+                    required
+                    accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.docx,.txt"
+                >
+                <small id="selected-files-count">Файлы ещё не выбраны</small>
+            </label>
+
+            <fieldset class="collection-selector">
+                <legend>Какую информацию собрать</legend>
+                <label class="mode-option">
+                    <input type="radio" name="collection_mode" value="all" checked>
+                    <span><strong>Полный анализ</strong><small>Собрать все доступные поля и таблицы.</small></span>
+                </label>
+                <label class="mode-option">
+                    <input type="radio" name="collection_mode" value="custom">
+                    <span><strong>Только выбранная информация</strong><small>Показать и экспортировать только нужные категории и поля.</small></span>
+                </label>
+
+                <div id="field-selection-panel" class="field-selection-panel is-disabled">
+                    <div class="selection-toolbar">
+                        <label class="field-search">
+                            <span>Найти поле</span>
+                            <input id="field-search" type="search" placeholder="Например: ИИН, VIN, сумма">
+                        </label>
+                        <span id="selection-count" class="selection-count">Выбрано полей: 0</span>
+                        <button type="button" class="button secondary" id="select-all-fields">Выбрать всё</button>
+                        <button type="button" class="button secondary" id="clear-all-fields">Очистить</button>
+                    </div>
+                    {% for category in field_categories %}
+                    <details class="field-category">
+                        <summary>
+                            <label>
+                                <input type="checkbox" name="selected_categories" value="{{ category.key }}" class="category-checkbox">
+                                <strong>{{ category.label_ru }}</strong>
+                            </label>
+                        </summary>
+                        <div class="field-grid">
+                            {% for field_name, field_label in category.fields %}
+                                {% if field_name != 'custom' %}
+                                <label>
+                                    <input type="checkbox" name="selected_fields" value="{{ field_name }}" data-category="{{ category.key }}">
+                                    <span>{{ field_label }}</span>
+                                </label>
+                                {% endif %}
+                            {% endfor %}
+                        </div>
+                    </details>
+                    {% endfor %}
+                </div>
+            </fieldset>
+            <fieldset class="analysis-mode">
+                <legend>Режим анализа</legend>
+                {% for mode_key, mode in analysis_modes.items() %}
+                    <label class="mode-option">
+                        <input type="radio" name="analysis_mode" value="{{ mode_key }}" {{ 'checked' if mode_key == 'auto' else '' }}>
+                        <span>
+                            <strong>{{ mode.label_ru }}</strong>
+                            <small>
+                                {% if mode_key == 'auto' %}Рекомендуется: цифровой текст без OCR, для сканов — ограниченный адаптивный OCR.
+                                {% elif mode_key == 'fast' %}Меньше OCR-проходов, быстрее для черновой проверки.
+                                {% elif mode_key == 'accurate' %}Больше OCR-проходов и повышенное разрешение.
+                                {% else %}Баланс скорости и качества для обычной работы.{% endif %}
+                            </small>
+                        </span>
+                    </label>
+                {% endfor %}
+            </fieldset>
+            <button type="submit">Проанализировать</button>
+        </form>
+    </section>
+
+    <section class="card">
+        <h2>Поддерживаемые форматы</h2>
+        <p>{{ supported_formats }}</p>
+
+        <h2>Распознаваемые типы</h2>
+        <ul>
+            <li>договор купли-продажи;</li>
+            <li>договор финансового лизинга;</li>
+            <li>акт приёма-передачи;</li>
+            <li>график платежей;</li>
+            <li>дополнительное соглашение;</li>
+            <li>квитанция о подписании;</li>
+            <li>неизвестный документ — с универсальным извлечением сумм, ИИН/БИН, VIN, IBAN и реквизитов.</li>
+        </ul>
+    </section>
+</main>
+
+<div class="analysis-progress" id="analysis-progress" hidden role="status" aria-live="polite">
+    <div class="analysis-progress-card">
+        <div class="progress-spinner" aria-hidden="true"></div>
+        <h2>Документы обрабатываются</h2>
+        <p id="analysis-progress-stage">Загрузка файлов…</p>
+        <p class="progress-details">
+            Прошло: <strong id="analysis-elapsed">0:00</strong>
+            · файлов: <strong id="analysis-file-count">0</strong>
+        </p>
+        <p class="progress-note">Сканированные страницы распознаются дольше. Не закрывайте эту вкладку.</p>
+    </div>
+</div>
+
+<script>
+(() => {
+    const form = document.getElementById('analysis-form');
+    const fileInput = document.getElementById('documents-input');
+    const fileCount = document.getElementById('selected-files-count');
+    const panel = document.getElementById('field-selection-panel');
+    const modeInputs = document.querySelectorAll('input[name="collection_mode"]');
+    const categoryInputs = document.querySelectorAll('.category-checkbox');
+    const fieldInputs = document.querySelectorAll('input[name="selected_fields"]');
+    const fieldSearch = document.getElementById('field-search');
+    const selectionCount = document.getElementById('selection-count');
+
+    function updateFileCount() {
+        const count = fileInput.files.length;
+        fileCount.textContent = count ? `Выбрано файлов: ${count}` : 'Файлы ещё не выбраны';
+    }
+    function updateMode() {
+        const custom = document.querySelector('input[name="collection_mode"]:checked').value === 'custom';
+        panel.classList.toggle('is-disabled', !custom);
+        panel.querySelectorAll('input, button').forEach(el => el.disabled = !custom);
+        updateSelectionCount();
+    }
+    function updateSelectionCount() {
+        const count = [...fieldInputs].filter(item => item.checked).length;
+        selectionCount.textContent = `Выбрано полей: ${count}`;
+    }
+    function updateCategoryState(categoryKey) {
+        const category = document.querySelector(`.category-checkbox[value="${categoryKey}"]`);
+        const related = [...document.querySelectorAll(`input[name="selected_fields"][data-category="${categoryKey}"]`)];
+        const checked = related.filter(item => item.checked).length;
+        category.checked = related.length > 0 && checked === related.length;
+        category.indeterminate = checked > 0 && checked < related.length;
+    }
+    function filterFieldList() {
+        const query = fieldSearch.value.trim().toLocaleLowerCase('ru');
+        document.querySelectorAll('.field-category').forEach(category => {
+            let visible = 0;
+            category.querySelectorAll('.field-grid label').forEach(label => {
+                const matches = !query || label.textContent.toLocaleLowerCase('ru').includes(query);
+                label.hidden = !matches;
+                if (matches) visible += 1;
+            });
+            category.hidden = visible === 0;
+            if (query && visible) category.open = true;
+        });
+    }
+    categoryInputs.forEach(category => {
+        category.addEventListener('change', () => {
+            document.querySelectorAll(`input[name="selected_fields"][data-category="${category.value}"]`)
+                .forEach(field => field.checked = category.checked);
+            category.indeterminate = false;
+            updateSelectionCount();
+        });
+    });
+    fieldInputs.forEach(field => {
+        field.addEventListener('change', () => {
+            updateCategoryState(field.dataset.category);
+            updateSelectionCount();
+        });
+    });
+    document.getElementById('select-all-fields').addEventListener('click', () => {
+        categoryInputs.forEach(item => item.checked = true);
+        categoryInputs.forEach(item => item.indeterminate = false);
+        fieldInputs.forEach(item => item.checked = true);
+        updateSelectionCount();
+    });
+    document.getElementById('clear-all-fields').addEventListener('click', () => {
+        categoryInputs.forEach(item => item.checked = false);
+        categoryInputs.forEach(item => item.indeterminate = false);
+        fieldInputs.forEach(item => item.checked = false);
+        updateSelectionCount();
+    });
+    fieldSearch.addEventListener('input', filterFieldList);
+    fileInput.addEventListener('change', updateFileCount);
+    modeInputs.forEach(item => item.addEventListener('change', updateMode));
+    form.addEventListener('submit', event => {
+        const custom = document.querySelector('input[name="collection_mode"]:checked').value === 'custom';
+        if (custom && ![...fieldInputs].some(item => item.checked)) {
+            event.preventDefault();
+            window.alert('Выберите хотя бы одно поле для выборочного анализа.');
+            fieldSearch.focus();
+            return;
+        }
+        const overlay = document.getElementById('analysis-progress');
+        const submitButton = form.querySelector('button[type="submit"]');
+        const elapsed = document.getElementById('analysis-elapsed');
+        const stage = document.getElementById('analysis-progress-stage');
+        document.getElementById('analysis-file-count').textContent = fileInput.files.length;
+        overlay.hidden = false;
+        submitButton.disabled = true;
+        submitButton.textContent = 'Обработка…';
+        const started = Date.now();
+        const stages = [
+            [0, 'Загрузка и проверка файлов…'],
+            [3, 'Чтение цифрового текста и сканированных страниц…'],
+            [12, 'OCR и извлечение выбранных полей…'],
+            [35, 'Проверка значений и связей между документами…'],
+            [60, 'Формирование результата…'],
+        ];
+        window.setInterval(() => {
+            const seconds = Math.floor((Date.now() - started) / 1000);
+            elapsed.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+            const current = [...stages].reverse().find(([after]) => seconds >= after);
+            if (current) stage.textContent = current[1];
+        }, 1000);
+    });
+    updateMode();
+})();
+</script>
+
+</body>
+</html>
